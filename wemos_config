@@ -1,0 +1,120 @@
+#include <Wire.h>
+#include <BH1750.h>
+#include <Adafruit_ADS1X15.h>
+#include <DHT.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h> // 
+#include <ArduinoJson.h>
+
+
+BH1750 lightMeter;
+Adafruit_ADS1115 ads;
+#define DHTPIN 2     
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+const char* ssid = "Broszhko_WiFi";
+const char* password = "";
+
+const char* serverUrl = ""; 
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("\n\n=== СИСТЕМА МОНІТОРИНГУ: СТАРТ (HTTPS) ===");
+
+  Wire.begin(); 
+  
+  if (lightMeter.begin()) {
+    Serial.println("✅ BH1750 (Світло) готовий");
+  } else {-> 🌡 T: 23.3C | H: 30.0%
+12:40:55.978 -> ☀️ Світло: 74.2 lx
+12:40:55.978 -> 🌱 Ґрунт 1 (A0): 0.948V -> 80%
+12:40:55.978 -> 🌱 Ґрунт 2 (A1): 1.944V -> 82%
+12:40:57.192 -> 🚀 Відправлено! Код: 200
+    Serial.println("❌ Помилка BH1750");
+  }
+
+  if (ads.begin()) {
+    Serial.println("✅ ADS1115 (АЦП) готовий");
+  } else {
+    Serial.println("❌ Помилка ADS1115");
+  }
+
+  dht.begin();
+  Serial.println("✅ DHT11 (Повітря) готовий");
+
+  WiFi.begin(ssid, password);
+  Serial.print("Підключення до WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✅ WiFi підключено! IP: " + WiFi.localIP().toString());
+}
+
+void loop() {
+  Serial.println("\n--- Отримання нових даних ---");
+
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+  if (isnan(h) || isnan(t)) {
+    Serial.println("⚠️ DHT11 не відповідає!");
+    h = 0; t = 0;
+  }
+
+  float lux = lightMeter.readLightLevel();
+
+  int16_t adc0 = ads.readADC_SingleEnded(0);
+  float volts0 = ads.computeVolts(adc0);
+
+  int soil1 = map((long)(volts0 * 1000), 2139, 657, 0, 100); 
+  soil1 = constrain(soil1, 0, 100);
+
+  int16_t adc1 = ads.readADC_SingleEnded(1);
+  float volts1 = ads.computeVolts(adc1);
+  // Твоє калібрування: Сухо 2634, Мокро 1797
+  int soil2 = map((long)(volts1 * 1000), 2634, 1797, 0, 100); 
+  soil2 = constrain(soil2, 0, 100);
+
+  Serial.printf("🌡 T: %.1fC | H: %.1f%%\n", t, h);
+  Serial.printf("☀️ Світло: %.1f lx\n", lux);
+  Serial.printf("🌱 Ґрунт 1 (A0): %.3fV -> %d%%\n", volts0, soil1);
+  Serial.printf("🌱 Ґрунт 2 (A1): %.3fV -> %d%%\n", volts1, soil2);
+
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure client; 
+    client.setInsecure();   
+
+    HTTPClient http;
+    
+    if (http.begin(client, serverUrl)) {
+      http.addHeader("Content-Type", "application/json");
+
+      StaticJsonDocument<512> doc;
+      doc["deviceId"] = "Wemos_Pavlo_IR21";
+      doc["lux"] = lux;
+      doc["soilMoisture"] = soil1;
+      doc["soilMoisture2"] = soil2;
+      doc["airTemp"] = t;
+      doc["airHumidity"] = h;
+
+      String jsonPayload;
+      serializeJson(doc, jsonPayload);
+      
+      int httpCode = http.POST(jsonPayload);
+      
+      if (httpCode > 0) {
+        Serial.printf("🚀 Відправлено! Код: %d\n", httpCode);
+      } else {
+        Serial.printf("❌ Помилка POST: %s\n", http.errorToString(httpCode).c_str());
+      }
+      http.end();
+    } else {
+      Serial.println("❌ Не вдалося підключитися до сервера");
+    }
+  }
+
+  delay(10000); 
+}
